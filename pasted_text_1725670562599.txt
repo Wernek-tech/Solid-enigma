@@ -1,0 +1,111 @@
+import discord
+from discord import app_commands
+from discord.ext import commands
+import youtube_dl
+import asyncio
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('music_bot')
+
+class Music(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.music_queue = []
+        self.is_playing = False
+        self.current_song = None
+
+    async def join_voice_channel(self, interaction: discord.Interaction):
+        if interaction.user.voice is None:
+            await interaction.followup.send("You are not in a voice channel!", ephemeral=True)
+            return None
+
+        voice_channel = interaction.user.voice.channel
+        try:
+            if interaction.guild.voice_client is None:
+                voice_client = await voice_channel.connect()
+            else:
+                voice_client = interaction.guild.voice_client
+                if voice_client.channel != voice_channel:
+                    await voice_client.move_to(voice_channel)
+            return voice_client
+        except Exception as e:
+            logger.error(f"Error joining voice channel: {e}")
+            await interaction.followup.send("Failed to join the voice channel. Please try again.", ephemeral=True)
+            return None
+
+    @app_commands.command(name="play", description="Play a song from a YouTube URL")
+    async def play(self, interaction: discord.Interaction, url: str):
+        await interaction.response.defer()
+
+        voice_client = await self.join_voice_channel(interaction)
+        if voice_client is None:
+            return
+
+        try:
+            self.music_queue.append(url)
+            await interaction.followup.send(f"Added {url} to the queue!")
+
+            # If no song is currently playing, play the next one
+            if not self.is_playing:
+                await self.play_next_song(voice_client)
+        except Exception as e:
+            logger.error(f"Error in play command: {e}")
+            await interaction.followup.send("An error occurred while trying to play the song. Please try again.", ephemeral=True)
+
+    async def play_next_song(self, voice_client):
+        if len(self.music_queue) > 0:
+            self.is_playing = True
+            url = self.music_queue.pop(0)
+            self.current_song = url
+
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+                'restrictfilenames': True,
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'logtostderr': False,
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'auto',
+                'source_address': '0.0.0.0'
+            }
+
+            try:
+                with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                    logger.info(f"Extracting info for URL: {url}")
+                    info = ydl.extract_info(url, download=False)
+                    url2 = info['formats'][0]['url']
+                    logger.info(f"Extracted audio URL: {url2}")
+                    
+                    source = await discord.FFmpegOpusAudio.from_probe(url2, method='fallback')
+
+                    def after_playing(error):
+                        if error:
+                            logger.error(f"Error occurred while playing: {error}")
+                        asyncio.run_coroutine_threadsafe(self.play_next_song(voice_client), self.bot.loop)
+
+                    voice_client.play(source, after=after_playing)
+                    logger.info(f"Now playing: {url}")
+
+            except Exception as e:
+                logger.error(f"An error occurred while trying to play the song: {e}")
+                self.is_playing = False
+                self.current_song = None
+                await self.play_next_song(voice_client)
+
+        else:
+            self.is_playing = False
+            self.current_song = None
+            await voice_client.disconnect()
+            logger.info("Finished playing all songs in the queue")
+
+    # Pause, resume, skip, stop, and queue commands remain the same...

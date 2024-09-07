@@ -1,0 +1,115 @@
+import discord
+from discord.ext import commands
+import youtube_dl
+import os
+import asyncio
+from discord import app_commands
+from dotenv import load_dotenv
+import subprocess
+
+# Load .env file and get the token
+load_dotenv()
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+# Ensure FFMPEG is available in the system's PATH
+def check_ffmpeg():
+    try:
+        subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print("FFMPEG is installed and available in PATH.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("FFMPEG not found. Please install and configure it in your system's PATH.")
+        raise
+
+check_ffmpeg()
+
+# Set up bot intents
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+guild_id = 123456789012345678  # Replace with your server's Guild ID
+
+# Command tree for slash commands
+tree = app_commands.CommandTree(bot)
+
+music_queue = []
+
+
+class Music(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.music_queue = []
+
+    # Join the user's voice channel
+    async def join_voice_channel(self, interaction: discord.Interaction):
+        if interaction.user.voice is None:
+            await interaction.response.send_message("You are not in a voice channel!", ephemeral=True)
+            return None
+
+        voice_channel = interaction.user.voice.channel
+        if interaction.guild.voice_client is None:
+            await voice_channel.connect()
+        elif interaction.guild.voice_client.channel != voice_channel:
+            await interaction.guild.voice_client.move_to(voice_channel)
+        return interaction.guild.voice_client
+
+    # Slash command to play music
+    @tree.command(name="play", description="Play a song from a YouTube URL", guild=discord.Object(id=guild_id))
+    async def play(self, interaction: discord.Interaction, url: str):
+        voice_client = await self.join_voice_channel(interaction)
+        if voice_client is None:
+            return
+
+        await interaction.response.send_message(f"Adding {url} to the queue!")
+        self.music_queue.append(url)
+
+        if not voice_client.is_playing():
+            await self.play_next_song(voice_client)
+
+    # Play the next song in the queue
+    async def play_next_song(self, voice_client):
+        if len(self.music_queue) > 0:
+            url = self.music_queue.pop(0)
+
+            # YouTube download options
+            ydl_opts = {
+                'format': 'bestaudio',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }]
+            }
+
+            # Download audio and play it in the voice channel
+            with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                url2 = info['formats'][0]['url']
+                source = await discord.FFmpegOpusAudio.from_probe(url2, method='fallback')
+
+                voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next_song(voice_client), self.bot.loop))
+
+        else:
+            await voice_client.disconnect()
+
+
+# Handle errors
+@tree.error
+async def play_error(interaction: discord.Interaction, error):
+    await interaction.response.send_message(f"An error occurred: {error}", ephemeral=True)
+
+
+# Sync the command tree
+@bot.event
+async def on_ready():
+    await tree.sync(guild=discord.Object(id=guild_id))
+    print(f"Bot is ready and logged in as {bot.user}")
+
+
+# Add the music cog to the bot
+bot.add_cog(Music(bot))
+
+
+if __name__ == "__main__":
+    bot.run(TOKEN)
